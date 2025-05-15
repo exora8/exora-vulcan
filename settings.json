@@ -1,0 +1,17 @@
+// settings.json (Contoh awal)
+{
+    "api_key": "MASUKKAN_API_KEY_ANDA_DISINI",
+    "crypto_pair": "BTC-USD",
+    "symbol": "BTC",
+    "currency": "USD",
+    "exchange": "Coinbase", // Atau exchange lain yang didukung CryptoCompare
+    "refresh_interval_seconds": 15,
+    "data_limit": 250, // Jumlah candle terbaru yang diambil tiap refresh
+    "left_strength": 50,
+    "right_strength": 150,
+    "profit_target_percent_activation": 5.0,
+    "trailing_stop_gap_percent": 5.0,
+    "emergency_sl_percent": 10.0,
+    "enable_secure_fib": true,
+    "secure_fib_check_price": "Close"
+}

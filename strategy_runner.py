@@ -11,8 +11,8 @@ class AnsiColors:
     GREEN = '\033[92m'
     RED = '\033[91m'
     BLUE = '\033[94m'
-    ORANGE = '\033[93m' # Istilah teknisnya Yellow, tapi visualnya oranye
-    RESET = '\033[0m'   # Reset warna ke default
+    ORANGE = '\033[93m'
+    RESET = '\033[0m'
 
 # --- KONFIGURASI LOGGING ---
 logging.basicConfig(level=logging.INFO,
@@ -21,8 +21,9 @@ logging.basicConfig(level=logging.INFO,
                               logging.StreamHandler()])
 
 SETTINGS_FILE = "settings.json"
+CRYPTOCOMPARE_MAX_LIMIT = 1999 # Maksimum limit per request (API mengembalikan limit+1)
 
-# --- FUNGSI PENGATURAN --- (Sama seperti sebelumnya)
+# --- FUNGSI PENGATURAN ---
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, 'r') as f:
@@ -30,13 +31,15 @@ def load_settings():
                 return json.load(f)
             except json.JSONDecodeError:
                 logging.error("Error membaca settings.json. Menggunakan default.")
+    # Default settings
     return {
         "api_key": "YOUR_API_KEY_HERE",
         "symbol": "BTC",
         "currency": "USD",
         "exchange": "CCCAGG",
-        "refresh_interval_seconds": 15,
-        "data_limit": 250,
+        "timeframe": "hour", # Pilihan: 'minute', 'hour', 'day'
+        "refresh_interval_seconds": 60, # Sesuaikan dengan timeframe
+        # "data_limit" dihapus, akan menggunakan CRYPTOCOMPARE_MAX_LIMIT untuk fetch awal
         "left_strength": 50,
         "right_strength": 150,
         "profit_target_percent_activation": 5.0,
@@ -59,9 +62,18 @@ def settings_menu(current_settings):
         new_settings["symbol"] = (input(f"Simbol Crypto Dasar (misal BTC) [{current_settings.get('symbol','BTC')}]: ") or current_settings.get('symbol','BTC')).upper()
         new_settings["currency"] = (input(f"Simbol Mata Uang Quote (misal USDT, USD) [{current_settings.get('currency','USD')}]: ") or current_settings.get('currency','USD')).upper()
         new_settings["exchange"] = (input(f"Exchange (misal Binance, Coinbase, atau CCCAGG untuk agregat) [{current_settings.get('exchange','CCCAGG')}]: ") or current_settings.get('exchange','CCCAGG'))
-        new_settings["refresh_interval_seconds"] = int(input(f"Interval Refresh (detik) [{current_settings.get('refresh_interval_seconds',15)}]: ") or current_settings.get('refresh_interval_seconds',15))
-        new_settings["data_limit"] = int(input(f"Limit Data Candle (untuk analisis awal) [{current_settings.get('data_limit',250)}]: ") or current_settings.get('data_limit',250))
-        print("\n-- Parameter Pivot --")
+        
+        tf_input = (input(f"Timeframe (minute/hour/day) [{current_settings.get('timeframe','hour')}]: ") or current_settings.get('timeframe','hour')).lower()
+        if tf_input in ['minute', 'hour', 'day']:
+            new_settings["timeframe"] = tf_input
+        else:
+            print("Timeframe tidak valid. Menggunakan nilai sebelumnya.")
+            new_settings["timeframe"] = current_settings.get('timeframe','hour')
+
+        new_settings["refresh_interval_seconds"] = int(input(f"Interval Refresh (detik) [{current_settings.get('refresh_interval_seconds',60)}]: ") or current_settings.get('refresh_interval_seconds',60))
+        # Input "data_limit" dihapus
+        
+        print("\n-- Parameter Pivot --") # (Parameter Pivot dan Trading tetap sama)
         new_settings["left_strength"] = int(input(f"Left Strength (Bars Kiri) [{current_settings.get('left_strength',50)}]: ") or current_settings.get('left_strength',50))
         new_settings["right_strength"] = int(input(f"Right Strength (Bars Kanan - Konfirmasi) [{current_settings.get('right_strength',150)}]: ") or current_settings.get('right_strength',150))
         print("\n-- Parameter Trading --")
@@ -77,36 +89,64 @@ def settings_menu(current_settings):
         else:
             print("Pilihan harga Secure FIB tidak valid. Menggunakan nilai sebelumnya.")
             new_settings["secure_fib_check_price"] = current_settings.get('secure_fib_check_price','Close')
+
         save_settings(new_settings)
         return new_settings
     except ValueError:
         print("Input tidak valid. Pengaturan tidak diubah.")
         return current_settings
 
-# --- FUNGSI PENGAMBILAN DATA --- (Sama seperti sebelumnya)
-def fetch_candles(symbol, currency, limit, exchange_name, api_key):
-    url = f"https://min-api.cryptocompare.com/data/v2/histohour"
-    params = {"fsym": symbol, "tsym": currency, "limit": limit -1, "api_key": api_key}
+# --- FUNGSI PENGAMBILAN DATA ---
+def fetch_candles(symbol, currency, limit, exchange_name, api_key, timeframe="hour"):
+    if timeframe == "minute":
+        api_endpoint = "histominute"
+    elif timeframe == "day":
+        api_endpoint = "histoday"
+    else: # Default ke hour
+        api_endpoint = "histohour"
+        
+    url = f"https://min-api.cryptocompare.com/data/v2/{api_endpoint}"
+    
+    params = {
+        "fsym": symbol,
+        "tsym": currency,
+        "limit": limit, # CryptoCompare expects (number of data points - 1)
+        "api_key": api_key
+    }
     if exchange_name and exchange_name.upper() != "CCCAGG":
         params["e"] = exchange_name
+    
     try:
+        logging.debug(f"Fetching data from: {url} with params: {params}")
         response = requests.get(url, params=params)
         response.raise_for_status() 
         data = response.json()
+
         if data.get('Response') == 'Error':
             logging.error(f"API Error dari CryptoCompare: {data.get('Message', 'Pesan error tidak diketahui')}")
-            logging.error(f"Parameter API: fsym={symbol}, tsym={currency}, exchange={exchange_name or 'CCCAGG (default)'}, limit={limit-1}")
+            logging.error(f"Parameter API: fsym={symbol}, tsym={currency}, exchange={exchange_name or 'CCCAGG (default)'}, limit={limit}, timeframe={timeframe}")
             return pd.DataFrame()
+
         if 'Data' not in data or 'Data' not in data['Data']:
             logging.error(f"Format data dari API tidak sesuai harapan. Respons: {data}")
             return pd.DataFrame()
+
         df = pd.DataFrame(data['Data']['Data'])
         if df.empty:
             logging.info("Tidak ada data candle yang diterima dari API (DataFrame kosong).")
             return pd.DataFrame()
+
         df['timestamp'] = pd.to_datetime(df['time'], unit='s')
         df = df.set_index('timestamp')
-        df = df[['open', 'high', 'low', 'close', 'volumefrom']] 
+        # Pastikan semua kolom ada, jika tidak, tambahkan dengan nilai default atau log error
+        expected_cols = ['open', 'high', 'low', 'close', 'volumefrom']
+        for col in expected_cols:
+            if col not in df.columns:
+                logging.warning(f"Kolom '{col}' tidak ditemukan dalam data API. Ini bisa menyebabkan error. Data: {df.head()}")
+                # Anda bisa memutuskan untuk mengisi dengan NaN atau menghentikan proses jika kolom krusial hilang
+                df[col] = pd.NA # Atau 0, atau handle sesuai kebutuhan
+        
+        df = df[expected_cols] # Pilih kolom yang diharapkan
         df.rename(columns={'volumefrom': 'volume'}, inplace=True)
         return df
     except requests.exceptions.RequestException as e:
@@ -119,7 +159,7 @@ def fetch_candles(symbol, currency, limit, exchange_name, api_key):
         logging.error(f"Error tidak diketahui saat mengambil data: {e}")
         return pd.DataFrame()
 
-# --- LOGIKA STRATEGI ---
+# --- LOGIKA STRATEGI --- (find_pivots dan strategy_state tetap sama)
 strategy_state = {
     "last_signal_type": 0, "final_pivot_high_price_confirmed": None, "final_pivot_low_price_confirmed": None,
     "high_price_for_fib": None, "high_bar_index_for_fib": None, "active_fib_level": None,
@@ -128,7 +168,7 @@ strategy_state = {
     "emergency_sl_level_custom": None, "position_size": 0,
 }
 
-def find_pivots(series_list, left_strength, right_strength, is_high=True): # Menerima list
+def find_pivots(series_list, left_strength, right_strength, is_high=True):
     pivots = [None] * len(series_list)
     if len(series_list) < left_strength + right_strength + 1:
         return pivots
@@ -149,18 +189,17 @@ def find_pivots(series_list, left_strength, right_strength, is_high=True): # Men
             pivots[i] = series_list[i] 
     return pivots
 
-def run_strategy_logic(df, settings):
+def run_strategy_logic(df, settings): # (Isi fungsi run_strategy_logic tetap sama seperti versi sebelumnya dengan warna log)
     global strategy_state 
     strategy_state["final_pivot_high_price_confirmed"] = None
     strategy_state["final_pivot_low_price_confirmed"] = None
     left_strength = settings['left_strength']
     right_strength = settings['right_strength']
-    required_cols = ['high', 'low', 'open', 'close']
+    required_cols = ['high', 'low', 'open', 'close'] # volume tidak langsung dipakai di logic inti ini
     if df.empty or not all(col in df.columns for col in required_cols):
-        logging.warning("DataFrame kosong atau kekurangan kolom untuk run_strategy_logic.")
+        logging.warning("DataFrame kosong atau kekurangan kolom (open, high, low, close) untuk run_strategy_logic.")
         return
 
-    # Gunakan .tolist() untuk konversi ke list sebelum dikirim ke find_pivots
     raw_pivot_highs = find_pivots(df['high'].tolist(), left_strength, right_strength, is_high=True)
     raw_pivot_lows  = find_pivots(df['low'].tolist(),  left_strength, right_strength, is_high=False)
     
@@ -206,6 +245,8 @@ def run_strategy_logic(df, settings):
                 is_fib_late = False
                 if settings["enable_secure_fib"]:
                     price_to_check_str = settings["secure_fib_check_price"].lower()
+                    if price_to_check_str not in current_candle: # Fallback if column name is weird
+                         price_to_check_str = 'close' 
                     price_val_current_candle = current_candle[price_to_check_str]
                     if price_val_current_candle > calculated_fib_level:
                         is_fib_late = True
@@ -215,7 +256,7 @@ def run_strategy_logic(df, settings):
                     strategy_state["active_fib_level"] = None
                     strategy_state["active_fib_line_start_index"] = None
                 else:
-                    logging.info(f"FIB 0.5 Aktif: {calculated_fib_level:.5f} (dari High {strategy_state['high_price_for_fib']:.5f} di {df.index[strategy_state['high_bar_index_for_fib']]} & Low {current_low_price:.5f} di {df.index[current_low_bar_index]})")
+                    logging.info(f"FIB 0.5 Aktif: {calculated_fib_level:.5f} (High {strategy_state['high_price_for_fib']:.5f} @{df.index[strategy_state['high_bar_index_for_fib']]} & Low {current_low_price:.5f} @{df.index[current_low_bar_index]})")
                     strategy_state["active_fib_level"] = calculated_fib_level
                     strategy_state["active_fib_line_start_index"] = current_low_bar_index
                 strategy_state["high_price_for_fib"] = None
@@ -234,7 +275,7 @@ def run_strategy_logic(df, settings):
                 strategy_state["emergency_sl_level_custom"] = strategy_state["entry_price_custom"] * (1 - settings["emergency_sl_percent"] / 100.0)
                 
                 logging.info(f"{AnsiColors.GREEN}BUY ENTRY @ {strategy_state['entry_price_custom']:.5f} (FIB {strategy_state['active_fib_level']:.5f} terlewati){AnsiColors.RESET}")
-                logging.info(f"   Emergency SL: {strategy_state['emergency_sl_level_custom']:.5f}") # Tidak diwarnai agar fokus pada BUY
+                logging.info(f"   Emergency SL: {strategy_state['emergency_sl_level_custom']:.5f}")
             
             logging.debug(f"Garis FIB {strategy_state['active_fib_level']:.5f} dipotong karena harga close di atasnya.")
             strategy_state["active_fib_level"] = None 
@@ -243,10 +284,10 @@ def run_strategy_logic(df, settings):
     if strategy_state["position_size"] > 0: 
         strategy_state["highest_price_for_trailing"] = max(strategy_state.get("highest_price_for_trailing", current_candle['high']) , current_candle['high'])
         if not strategy_state["trailing_tp_active_custom"] and strategy_state["entry_price_custom"] is not None:
-            profit_percent = ((strategy_state["highest_price_for_trailing"] - strategy_state["entry_price_custom"]) / strategy_state["entry_price_custom"]) * 100.0
+            profit_percent = ((strategy_state["highest_price_for_trailing"] - strategy_state["entry_price_custom"]) / strategy_state["entry_price_custom"]) * 100.0 if strategy_state["entry_price_custom"] != 0 else 0
             if profit_percent >= settings["profit_target_percent_activation"]:
                 strategy_state["trailing_tp_active_custom"] = True
-                logging.info(f"{AnsiColors.BLUE}Trailing TP Aktif. Profit: {profit_percent:.2f}%, High: {strategy_state['highest_price_for_trailing']:.5f}{AnsiColors.RESET}") # TP related info in blue
+                logging.info(f"{AnsiColors.BLUE}Trailing TP Aktif. Profit: {profit_percent:.2f}%, High: {strategy_state['highest_price_for_trailing']:.5f}{AnsiColors.RESET}")
 
         if strategy_state["trailing_tp_active_custom"] and strategy_state["highest_price_for_trailing"] is not None:
             potential_new_stop_price = strategy_state["highest_price_for_trailing"] * (1 - (settings["trailing_stop_gap_percent"] / 100.0))
@@ -257,7 +298,7 @@ def run_strategy_logic(df, settings):
         final_stop_for_exit = strategy_state["emergency_sl_level_custom"]
         exit_comment = "Emergency SL"
         if strategy_state["trailing_tp_active_custom"] and strategy_state["current_trailing_stop_level"] is not None:
-            if final_stop_for_exit is None or strategy_state["current_trailing_stop_level"] > final_stop_for_exit : # Handle final_stop_for_exit being None
+            if final_stop_for_exit is None or strategy_state["current_trailing_stop_level"] > final_stop_for_exit :
                 final_stop_for_exit = strategy_state["current_trailing_stop_level"]
                 exit_comment = "Trailing Stop"
         
@@ -266,13 +307,10 @@ def run_strategy_logic(df, settings):
             pnl = 0.0
             if strategy_state["entry_price_custom"] is not None and strategy_state["entry_price_custom"] != 0:
                  pnl = (exit_price - strategy_state["entry_price_custom"]) / strategy_state["entry_price_custom"] * 100.0
-            
-            exit_color = AnsiColors.RED # Default untuk SL
-            if pnl > 0 and exit_comment == "Trailing Stop": # Jika Trailing Stop menghasilkan profit, bisa dianggap TP
+            exit_color = AnsiColors.RED 
+            if pnl > 0 and exit_comment == "Trailing Stop": 
                 exit_color = AnsiColors.BLUE 
-            
             logging.info(f"{exit_color}EXIT ORDER @ {exit_price:.5f} oleh {exit_comment}. PnL: {pnl:.2f}%{AnsiColors.RESET}")
-            
             strategy_state["position_size"] = 0; strategy_state["entry_price_custom"] = None
             strategy_state["highest_price_for_trailing"] = None; strategy_state["trailing_tp_active_custom"] = False
             strategy_state["current_trailing_stop_level"] = None; strategy_state["emergency_sl_level_custom"] = None
@@ -280,35 +318,35 @@ def run_strategy_logic(df, settings):
     if strategy_state["position_size"] > 0:
         plot_stop_level = strategy_state.get("emergency_sl_level_custom")
         if strategy_state.get("trailing_tp_active_custom") and strategy_state.get("current_trailing_stop_level") is not None:
-            # Pastikan kedua level ada sebelum membandingkan
             emergency_sl = strategy_state.get("emergency_sl_level_custom")
             current_trailing_sl = strategy_state.get("current_trailing_stop_level")
             if emergency_sl is not None and current_trailing_sl is not None and current_trailing_sl > emergency_sl:
                 plot_stop_level = current_trailing_sl
-            elif current_trailing_sl is not None and emergency_sl is None: # Jika emergency SL tidak ada (seharusnya tidak terjadi jika posisi aktif)
+            elif current_trailing_sl is not None and emergency_sl is None:
                  plot_stop_level = current_trailing_sl
-
-
-        # --- PERBAIKAN ERROR DI SINI ---
         entry_price_display = strategy_state.get('entry_price_custom', 0)
         sl_display_str = f'{plot_stop_level:.5f}' if plot_stop_level is not None else 'N/A'
         logging.debug(f"Posisi Aktif. Entry: {entry_price_display:.5f}, Current SL: {sl_display_str}")
 
-# --- FUNGSI UTAMA TRADING LOOP --- (Sama seperti sebelumnya, dengan penyesuaian `get` untuk settings)
+
+# --- FUNGSI UTAMA TRADING LOOP ---
 def start_trading(settings):
     display_pair = f"{settings.get('symbol','N/A')}-{settings.get('currency','N/A')}"
     display_exchange = settings.get('exchange','N/A')
-    logging.info(f"Memulai trading untuk {display_pair} di {display_exchange} dengan interval {settings.get('refresh_interval_seconds',0)} detik.")
+    display_timeframe = settings.get('timeframe','N/A')
+    logging.info(f"Memulai trading untuk {display_pair} di {display_exchange} (Timeframe: {display_timeframe}) dengan interval {settings.get('refresh_interval_seconds',0)} detik.")
+    # ... (sisa log info parameter sama) ...
     logging.info(f"Parameter: LeftStr={settings.get('left_strength',0)}, RightStr={settings.get('right_strength',0)}, "
                  f"ProfitTrailActiv={settings.get('profit_target_percent_activation',0.0)}%, TrailGap={settings.get('trailing_stop_gap_percent',0.0)}%, EmergSL={settings.get('emergency_sl_percent',0.0)}%")
     logging.info(f"SecureFIB: {settings.get('enable_secure_fib',False)}, SecureFIBCheck: {settings.get('secure_fib_check_price','N/A')}")
+
 
     if settings.get('api_key',"") == "YOUR_API_KEY_HERE" or not settings.get('api_key',""):
         logging.error("API Key belum diatur. Silakan atur melalui menu Settings.")
         return
 
-    global strategy_state
-    strategy_state = { # Reset state
+    global strategy_state # Reset state
+    strategy_state = {
         "last_signal_type": 0, "final_pivot_high_price_confirmed": None, "final_pivot_low_price_confirmed": None,
         "high_price_for_fib": None, "high_bar_index_for_fib": None, "active_fib_level": None,
         "active_fib_line_start_index": None, "entry_price_custom": None, "highest_price_for_trailing": None,
@@ -316,32 +354,37 @@ def start_trading(settings):
         "emergency_sl_level_custom": None, "position_size": 0,
     }
     
-    initial_fetch_limit = max(settings.get('data_limit',250), settings.get('left_strength',50) + settings.get('right_strength',150) + 50) 
-    initial_fetch_limit = min(initial_fetch_limit, 1999) 
-
-    all_data_df = fetch_candles(settings.get('symbol'), settings.get('currency'), initial_fetch_limit, settings.get('exchange'), settings.get('api_key'))
+    # Menggunakan CRYPTOCOMPARE_MAX_LIMIT untuk fetch awal dan update
+    fetch_limit_for_api = CRYPTOCOMPARE_MAX_LIMIT
+    
+    all_data_df = fetch_candles(settings.get('symbol'), settings.get('currency'), 
+                                fetch_limit_for_api, 
+                                settings.get('exchange'), settings.get('api_key'), 
+                                settings.get('timeframe'))
 
     if all_data_df.empty:
-        logging.error("Tidak ada data awal yang bisa diambil. Periksa Simbol, Mata Uang, Exchange, dan API Key. Menghentikan trading.")
+        logging.error("Tidak ada data awal yang bisa diambil. Periksa Simbol, Mata Uang, Exchange, Timeframe, dan API Key. Menghentikan trading.")
         return
 
-    logging.info(f"Memproses {max(0, len(all_data_df) - 1)} candle historis awal untuk inisialisasi state...")
+    logging.info(f"Memproses {max(0, len(all_data_df) - 1)} candle historis awal (dari {fetch_limit_for_api+1} data point maks) untuk inisialisasi state...")
     start_warmup_processing_idx = settings.get('left_strength',50) + settings.get('right_strength',150)
     for i in range(start_warmup_processing_idx, len(all_data_df) -1): 
         historical_slice = all_data_df.iloc[:i+1]
         if len(historical_slice) < start_warmup_processing_idx +1 : 
             continue
         run_strategy_logic(historical_slice, settings)
-        if strategy_state["position_size"] > 0: # Reset posisi jika terpicu saat pemanasan
+        if strategy_state["position_size"] > 0:
             strategy_state["position_size"] = 0 
-            strategy_state["entry_price_custom"] = None # Reset juga detail trading lainnya
+            strategy_state["entry_price_custom"] = None
             strategy_state["emergency_sl_level_custom"] = None
-            # ... (bisa ditambahkan reset variabel state trading lainnya)
     logging.info("Inisialisasi state selesai.")
 
     try:
         while True:
-            new_data_df = fetch_candles(settings.get('symbol'), settings.get('currency'), initial_fetch_limit, settings.get('exchange'), settings.get('api_key'))
+            new_data_df = fetch_candles(settings.get('symbol'), settings.get('currency'), 
+                                        fetch_limit_for_api, 
+                                        settings.get('exchange'), settings.get('api_key'), 
+                                        settings.get('timeframe'))
             if new_data_df.empty:
                 logging.warning("Gagal mengambil data baru atau tidak ada data baru. Mencoba lagi nanti.")
                 time.sleep(settings.get('refresh_interval_seconds',15))
@@ -361,9 +404,11 @@ def start_trading(settings):
                 except KeyError: 
                     logging.warning(f"Index lama {last_known_index_val} tidak ditemukan setelah concat. Memproses beberapa bar terakhir.")
                     start_processing_idx_loc = max(0, len(all_data_df) - 5) 
-            else:
-                 start_processing_idx_loc = max(0, len(all_data_df) - settings.get('data_limit', 250))
+            else: # Jika all_data_df kosong atau last_known_index_val tidak ada
+                 # Ini seharusnya tidak terjadi jika fetch awal berhasil
+                 start_processing_idx_loc = max(0, len(all_data_df) - int(fetch_limit_for_api/2) ) # fallback, proses setengah dari data yang diambil
                  start_processing_idx_loc = max(start_processing_idx_loc, settings.get('left_strength',50) + settings.get('right_strength',150))
+
 
             if start_processing_idx_loc >= len(all_data_df):
                 current_time_display = all_data_df.index[-1].strftime('%Y-%m-%d %H:%M:%S') if not all_data_df.empty else "N/A"
@@ -377,23 +422,27 @@ def start_trading(settings):
                     logging.info(f"--- Menganalisa candle: {current_processing_slice.index[-1].strftime('%Y-%m-%d %H:%M:%S')} (Close: {current_processing_slice.iloc[-1]['close']:.5f}) ---")
                     run_strategy_logic(current_processing_slice, settings)
             
-            max_hist_len = initial_fetch_limit * 2
-            if len(all_data_df) > max_hist_len:
-                all_data_df = all_data_df.iloc[-max_hist_len:]
+            # Tidak perlu memotong all_data_df karena kita selalu fetch jumlah besar dan buang duplikat.
+            # Jika memori jadi masalah, logic pemotongan bisa diaktifkan lagi.
+            # max_hist_len = fetch_limit_for_api * 2 
+            # if len(all_data_df) > max_hist_len:
+            #     all_data_df = all_data_df.iloc[-max_hist_len:]
+
             time.sleep(settings.get('refresh_interval_seconds',15))
     except KeyboardInterrupt:
         logging.info("Proses trading dihentikan oleh pengguna.")
     except Exception as e:
         logging.exception(f"Error tak terduga di loop trading utama: {e}")
 
-# --- MENU UTAMA --- (Sama seperti sebelumnya)
+# --- MENU UTAMA ---
 def main_menu():
     settings = load_settings()
     while True:
         display_pair = f"{settings.get('symbol','N/A')}-{settings.get('currency','N/A')}"
         display_exchange = settings.get('exchange','N/A')
+        display_timeframe = settings.get('timeframe','N/A')
         print("\n========= Crypto Strategy Runner =========")
-        print(f"Pair: {display_pair} | Exchange: {display_exchange} | Interval: {settings.get('refresh_interval_seconds',0)}s")
+        print(f"Pair: {display_pair} | Exchange: {display_exchange} | TF: {display_timeframe} | Interval: {settings.get('refresh_interval_seconds',0)}s")
         print("--------------------------------------")
         print("1. Mulai Analisa Realtime")
         print("2. Pengaturan")
